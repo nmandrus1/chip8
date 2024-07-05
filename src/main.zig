@@ -1,4 +1,6 @@
 const std = @import("std");
+const fs = std.fs;
+const posix = std.posix;
 
 // CHIP 8 Emulator
 //
@@ -177,17 +179,42 @@ pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // const allocator = gpa.allocator();
 
-    const stdin = std.io.getStdIn();
-    // const poller = std.io.Poller(std.fs.File);
-    var poller = std.io.poll(allocator, enum { stdin }, .{ .stdin = stdin });
-    defer poller.deinit();
+    // enter raw mode
+    const stdin_handle = posix.STDIN_FILENO;
+    const original_state = try enableRawMode(stdin_handle);
+    defer posix.tcsetattr(stdin_handle, .FLUSH, original_state) catch std.debug.panic("YOU ARE SO FUCKED!", .{});
 
-    while (try poller.poll()) {
-        std.debug.print("{any}", .{poller.fifo(.stdin).readItem().?});
+    // var poller = std.io.poll(allocator, enum { stdin }, .{ .stdin = stdin });
+    // defer poller.deinit();
+
+    while (true) {
+        var buf: [1]u8 = undefined;
+        _ = try posix.read(stdin_handle, &buf);
+        switch (buf[0]) {
+            'q' => break,
+            else => {},
+        }
     }
+}
+
+fn enableRawMode(handle: posix.fd_t) !posix.termios {
+    // https://zig.news/lhp/want-to-create-a-tui-application-the-basics-of-uncooked-terminal-io-17gm
+    const system = posix.system;
+
+    const original_termios = try posix.tcgetattr(handle);
+    var raw = original_termios;
+    raw.lflag.ECHO = false;
+    raw.lflag.ICANON = false;
+
+    raw.cflag.CSIZE = .CS8;
+    raw.cc[@intFromEnum(system.V.TIME)] = 0;
+    raw.cc[@intFromEnum(system.V.MIN)] = 0;
+
+    try posix.tcsetattr(handle, .FLUSH, raw);
+    return original_termios;
 }
 
 test "stack_push and stack_pop" {
