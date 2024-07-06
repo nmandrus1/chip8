@@ -163,9 +163,67 @@ const CPU = struct {
                 self.registers[x] = random_byte & kk;
             },
 
-            // Dxyn - Draw to screen
+            0xD000 => std.debug.print("DRW: TODO!", .{}),
 
-            else => std.process.exit(1),
+            0xE000 => switch (kk) {
+                // Ex9E - SKP Vx
+                // Skip next instruction if key with the value of Vx is pressed.
+                0x9E => std.debug.print("SKP Vx -- TODO!", .{}),
+
+                // ExA1 - SKNP Vx
+                // Skip next instruction if key with the value of Vx is not pressed.
+                0xA1 => std.debug.print("SKNP Vx -- TODO!", .{}),
+                else => unreachable,
+            },
+
+            0xF000 => switch (kk) {
+
+                // Fx07 - LD Vx, DT
+                // Set Vx = delay timer value.
+                0x07 => std.debug.print("LD Vx, DT -- TODO!", .{}),
+
+                // Fx0A - LD Vx, K
+                // Wait for a key press, store the value of the key in Vx.
+                0x0A => try std.io.getStdIn().read(self.registers[x .. x + 1]),
+
+                // Fx15 - LD DT, Vx
+                // Set delay timer = Vx.
+                0x15 => std.debug.print("LD DT, Vx -- TODO!", .{}),
+
+                // Fx18 - LD ST, Vx
+                // Set sound timer = Vx.
+                0x18 => std.debug.print("LD ST, Vx -- TODO!", .{}),
+
+                // Fx1E - ADD I, Vx
+                // Set I = I + Vx.
+                0x1E => self.i += self.registers[x],
+
+                // Fx29 - LD F, Vx
+                // Set I = location of sprite for digit Vx.
+                0x29 => std.debug.print("LD F, Vx -- TODO!", .{}),
+
+                // Fx33 - LD B, Vx
+                // Store BCD representation of Vx in memory locations I, I+1, and I+2.
+                0x33 => {
+                    var buf: [3]u8 = undefined;
+                    std.fmt.bufPrintIntToSlice(buf[0..], self.registers[x], 10, .lower, std.fmt.FormatOptions{});
+                    for (buf, 0..) |digit, idx| self.memory[self.i + idx] = digit;
+                },
+
+                // Fx55 - LD [I], Vx
+                // Store registers V0 through Vx in memory starting at location I.
+                0x55 => {
+                    for (0..x) |idx| self.memory[self.i + idx] = self.registers[idx];
+                },
+
+                // Fx65 - LD Vx, [I]
+                // Read registers V0 through Vx from memory starting at location I.
+                0x65 => {
+                    for (0..x) |idx| self.registers[idx] = self.memory[self.i + idx];
+                },
+            },
+
+            else => unreachable,
         }
     }
 
