@@ -1,6 +1,9 @@
 const std = @import("std");
+const SDL = @import("sdl2");
+
 const fs = std.fs;
 const posix = std.posix;
+const time = std.time;
 
 // CHIP 8 Emulator
 //
@@ -22,15 +25,70 @@ const CPU = struct {
 
     registers: [16]u8,
 
-    fn init() CPU {
+    display: [256]u8 = [_]u8{0} ** 256,
+
+    renderer: SDL.Renderer,
+    window: SDL.Window,
+
+    fn init() !CPU {
+        // Window setup
+        try SDL.init(.{
+            .video = true,
+            .events = true,
+        });
+
+        const window = try SDL.createWindow(
+            "SDL2 Wrapper Demo",
+            .{ .centered = {} },
+            .{ .centered = {} },
+            640,
+            320,
+            .{ .vis = .shown },
+        );
+
+        const renderer = try SDL.createRenderer(window, null, .{ .accelerated = true });
+
+        const sprite_slice = [_]u8{
+            0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+            0x20, 0x60, 0x20, 0x20, 0x70, // 1
+            0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+            0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+            0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+            0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+            0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+            0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+            0xF0, 0x90, 0xF0, 0x90, 0xF0, // 9
+            0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+            0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+            0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+            0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+            0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+            0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+            0xF0, 0x80, 0xF0, 0x80, 0x80, // F
+        };
+
         const cpu = CPU{
             .pc = 0x200,
             .sp = 0,
-            .memory = [_]u8{0} ** 4096,
+            // fill memory with sprite data and the rest with 0s
+            .memory = sprite_slice ++ [_]u8{0} ** (4096 - sprite_slice.len),
             .registers = [_]u8{0} ** 16,
+            .i = 0,
+            .window = window,
+            .renderer = renderer,
         };
 
         return cpu;
+    }
+
+    fn loadROM(self: *CPU, rom: std.fs.File) !void {
+        _ = try rom.readAll(self.memory[0x200..]);
+    }
+
+    fn deinit(self: CPU) void {
+        self.renderer.destroy();
+        self.window.destroy();
+        SDL.quit();
     }
 
     // push a 2 byte value to the stack
@@ -50,6 +108,7 @@ const CPU = struct {
 
     // read byte and move pc
     fn fetch(self: *CPU) u16 {
+        std.log.debug("PC: 0x{X:0>3}", .{self.pc});
         defer self.pc += 2;
         const msb = @as(u16, self.memory[self.pc]) << 8;
         const lsb = @as(u16, self.memory[self.pc + 1]);
@@ -58,15 +117,17 @@ const CPU = struct {
 
     fn decode_and_execute(self: *CPU, instr: u16) void {
         const nibble = instr & 0xF000;
-        const x = (instr & 0x0F00) >> 8;
-        const y = (instr & 0x00F0) >> 4;
-        const kk = instr & 0x00FF;
-        const nnn = instr & 0x0FFF;
+        const x: u8 = @truncate((instr & 0x0F00) >> 8);
+        const y: u8 = @truncate((instr & 0x00F0) >> 4);
+        const kk: u8 = @truncate(instr & 0x00FF);
+        const nnn: u12 = @truncate(instr & 0x0FFF);
         switch (nibble) {
             0x0000 => {
                 switch (instr) {
                     // CLS
-                    0x00E0 => std.debug.print("CLS Instruction Unimplemented!\n", .{}),
+                    0x00E0 => {
+                        for (&self.display) |*byte| byte.* = 0;
+                    },
                     // RET
                     0x00EE => self.jump(@truncate(self.stack_pop())),
                     else => self.jump(@truncate(instr)),
@@ -76,7 +137,7 @@ const CPU = struct {
             // jp nnn
             0x1000 => self.jump(@truncate(instr)),
 
-            // call subroutine
+            // 0x2nn call subroutine
             0x2000 => {
                 self.stack_push(self.pc);
                 self.jump(@truncate(instr));
@@ -101,10 +162,10 @@ const CPU = struct {
             },
 
             // 6xkk - LD Vx, byte
-            0x6000 => self.registers[x] = @truncate(kk),
+            0x6000 => self.registers[x] = kk,
 
             // 7xkk - ADD Vx, byte
-            0x7000 => self.registers[x] += @truncate(kk),
+            0x7000 => self.registers[x] += kk,
 
             0x8000 => {
                 const lsb = instr & 0x000F;
@@ -131,8 +192,9 @@ const CPU = struct {
                     // 0x8xy6 - SHR Vx
                     0x6 => {
                         // Vx = Vx >> 1 and Vf is set to 1 if lsb(Vx) = 1
-                        self.registers[0xF] = if (self.registers[x] & 0x01) 1 else 0;
-                        self.registers[x] >> 1;
+                        // TODO: Maybe just truncate??
+                        self.registers[0xF] = if (self.registers[x] & 0x01 == 1) 1 else 0;
+                        self.registers[x] >>= 1;
                     },
                     // 8xy7 - SUBN Vx, Vy
                     0x7 => {
@@ -144,8 +206,8 @@ const CPU = struct {
                     // 8xyE - SHL Vx {, Vy}
                     0xE => {
                         // Set Vx = Vx SHL 1.
-                        self.registers[0xF] = if (self.registers[x] >> 7) 1 else 0;
-                        self.registers[x] << 1;
+                        self.registers[0xF] = if (self.registers[x] >> 7 == 1) 1 else 0;
+                        self.registers[x] <<= 1;
                     },
                     else => unreachable,
                 }
@@ -155,7 +217,8 @@ const CPU = struct {
             0xA000 => self.i = nnn,
 
             // Bnnn - JP V0, addr
-            0xB000 => self.pc = self.registers[0] + nnn,
+            // TODO: fix? is there a better way to do this?
+            0xB000 => self.pc = nnn + self.registers[0],
 
             // Cxkk - RND Vx, byte
             0xC000 => {
@@ -163,16 +226,23 @@ const CPU = struct {
                 self.registers[x] = random_byte & kk;
             },
 
-            0xD000 => std.debug.print("DRW: TODO!", .{}),
+            // Dxyn - DRW Vx, Vy, nibble
+            // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
+            0xD000 => {
+                const n = instr & 0x000F;
+                self.drawSprite(self.memory[self.i .. self.i + n], self.registers[x], self.registers[y]);
+            },
 
+            // Ex9E - SKP Vx and ExA1 - SKNP Vx
             0xE000 => switch (kk) {
-                // Ex9E - SKP Vx
-                // Skip next instruction if key with the value of Vx is pressed.
-                0x9E => std.debug.print("SKP Vx -- TODO!", .{}),
-
-                // ExA1 - SKNP Vx
-                // Skip next instruction if key with the value of Vx is not pressed.
-                0xA1 => std.debug.print("SKNP Vx -- TODO!", .{}),
+                0x9E | 0xA1 => {
+                    if (pollKeyboard()) |key| {
+                        // Skip next instruction if key with the value of Vx is pressed.
+                        if ((key == self.registers[x] and kk == 0x9E) or
+                            // Skip next instruction if key with the value of Vx is not pressed.
+                            (key != self.registers[x] and kk == 0xA1)) self.pc += 2;
+                    }
+                },
                 else => unreachable,
             },
 
@@ -184,7 +254,7 @@ const CPU = struct {
 
                 // Fx0A - LD Vx, K
                 // Wait for a key press, store the value of the key in Vx.
-                0x0A => try std.io.getStdIn().read(self.registers[x .. x + 1]),
+                0x0A => self.registers[x] = waitForKey(),
 
                 // Fx15 - LD DT, Vx
                 // Set delay timer = Vx.
@@ -206,7 +276,7 @@ const CPU = struct {
                 // Store BCD representation of Vx in memory locations I, I+1, and I+2.
                 0x33 => {
                     var buf: [3]u8 = undefined;
-                    std.fmt.bufPrintIntToSlice(buf[0..], self.registers[x], 10, .lower, std.fmt.FormatOptions{});
+                    _ = std.fmt.bufPrintIntToSlice(buf[0..], self.registers[x], 10, .lower, std.fmt.FormatOptions{});
                     for (buf, 0..) |digit, idx| self.memory[self.i + idx] = digit;
                 },
 
@@ -221,6 +291,7 @@ const CPU = struct {
                 0x65 => {
                     for (0..x) |idx| self.registers[idx] = self.memory[self.i + idx];
                 },
+                else => unreachable,
             },
 
             else => unreachable,
@@ -231,48 +302,138 @@ const CPU = struct {
     fn jump(self: *CPU, addr: u12) void {
         self.pc = addr;
     }
+
+    fn drawScreen(self: *CPU) !void {
+        // clear and redraw the current screen
+        try self.renderer.clear();
+
+        for (self.display, 0..) |byte, idx| {
+            const y: usize = @divTrunc(idx, 8);
+            const x: usize = idx - (y * 8);
+
+            for (0..8) |xx| {
+                var pxl = Pixel;
+                pxl.x = @as(c_int, @intCast(x + xx)) * pxl.width;
+                pxl.y = @as(c_int, @intCast(y)) * pxl.height;
+
+                const clr = if ((byte >> @intCast(xx)) & 0x1 == 1) SDL.Color.white else SDL.Color.black;
+
+                try self.renderer.setColor(clr);
+                try self.renderer.fillRect(pxl);
+                try self.renderer.drawRect(pxl);
+            }
+        }
+
+        self.renderer.present();
+    }
+
+    fn drawSprite(self: *CPU, bytes: []u8, x: u8, y: u8) void {
+        std.debug.assert(bytes.len < 16);
+
+        // screen is 32 rows of 8 bytes, so we need to identify the bytes we are editing
+        const x_coord = @divTrunc(x, 8);
+        const starting_bit: u3 = @truncate(@mod(x, 8));
+        const split_byte = starting_bit != 0;
+
+        for (bytes, y..) |sprite, yy| {
+            const idx1 = yy * 8 + x_coord;
+            if (split_byte) {
+                // handle wrap around
+                const idx2 = yy * 8 + @divTrunc(@mod(x + 8, 64), 8);
+                const left_byte: u8 = sprite >> starting_bit;
+                const right_byte: u8 = (sprite << 1) << (7 - starting_bit - 1);
+
+                self.display[idx1] ^= left_byte;
+                self.display[idx2] ^= right_byte;
+            } else self.display[idx1] ^= sprite;
+        }
+    }
+
+    pub fn run(self: *CPU) !void {
+        // 60 fps
+        const frame_time_ms = 16;
+        try self.drawScreen();
+
+        // run as many instructions as we can per frame
+        mainLoop: while (true) {
+            const start = try time.Instant.now();
+            exeLoop: while (true) {
+                try self.step();
+
+                const end = try time.Instant.now();
+                std.debug.print("since start: {d}\n", .{end.since(start)});
+                if (end.since(start) >= frame_time_ms * time.ns_per_ms) break :exeLoop else {
+                    if (SDL.pollEvent()) |ev| switch (ev) {
+                        .quit => break :mainLoop,
+                        else => {},
+                    };
+                }
+            }
+
+            std.debug.print("here!!\n", .{});
+            try self.drawScreen();
+        }
+    }
+
+    pub fn step(self: *CPU) !void {
+        const instr = self.fetch();
+        std.log.debug("Opcode: 0x{X:0>4}", .{instr});
+        self.decode_and_execute(instr);
+    }
 };
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
 
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // const allocator = gpa.allocator();
+    const allocator = gpa.allocator();
 
-    // enter raw mode
-    const stdin_handle = posix.STDIN_FILENO;
-    const original_state = try enableRawMode(stdin_handle);
-    defer posix.tcsetattr(stdin_handle, .FLUSH, original_state) catch std.debug.panic("YOU ARE SO FUCKED!", .{});
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
 
-    // var poller = std.io.poll(allocator, enum { stdin }, .{ .stdin = stdin });
-    // defer poller.deinit();
+    _ = args.skip();
+    const rom_file = args.next().?;
 
-    while (true) {
-        var buf: [1]u8 = undefined;
-        _ = try posix.read(stdin_handle, &buf);
-        switch (buf[0]) {
-            'q' => break,
-            else => {},
-        }
-    }
+    const rom = try std.fs.cwd().openFile(rom_file, .{ .mode = .read_only });
+
+    var cpu = try CPU.init();
+    defer cpu.deinit();
+
+    try cpu.loadROM(rom);
+    try cpu.run();
 }
 
-fn enableRawMode(handle: posix.fd_t) !posix.termios {
-    // https://zig.news/lhp/want-to-create-a-tui-application-the-basics-of-uncooked-terminal-io-17gm
-    const system = posix.system;
+const Pixel = SDL.Rectangle{ .width = 10, .height = 10 };
 
-    const original_termios = try posix.tcgetattr(handle);
-    var raw = original_termios;
-    raw.lflag.ECHO = false;
-    raw.lflag.ICANON = false;
+fn pollKeyboard() ?u8 {
+    return if (SDL.pollEvent()) |ev| switch (ev) {
+        .key_down => |kev| switch (kev.keycode) {
+            .@"0" => return 0x0,
+            .@"1" => return 0x1,
+            .@"2" => return 0x2,
+            .@"3" => return 0x3,
+            .@"4" => return 0x4,
+            .@"5" => return 0x5,
+            .@"6" => return 0x6,
+            .@"7" => return 0x7,
+            .@"8" => return 0x8,
+            .@"9" => return 0x9,
+            .a => return 0xA,
+            .b => return 0xB,
+            .c => return 0xC,
+            .d => return 0xD,
+            .e => return 0xE,
+            .f => return 0xF,
+            else => return null,
+        },
+        else => null,
+    } else null;
+}
 
-    raw.cflag.CSIZE = .CS8;
-    raw.cc[@intFromEnum(system.V.TIME)] = 0;
-    raw.cc[@intFromEnum(system.V.MIN)] = 0;
-
-    try posix.tcsetattr(handle, .FLUSH, raw);
-    return original_termios;
+fn waitForKey() u8 {
+    while (true) {
+        if (pollKeyboard()) |code| return code;
+    }
 }
 
 test "stack_push and stack_pop" {
