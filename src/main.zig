@@ -332,7 +332,7 @@ const CPU = struct {
 
         // screen is 32 rows of 8 bytes, so we need to identify the bytes we are editing
         const x_coord = @divTrunc(x, 8);
-        const starting_bit: u3 = @truncate(@mod(x, 8));
+        const starting_bit: u3 = @intCast(x % 8);
         const split_byte = starting_bit != 0;
 
         for (bytes, y..) |sprite, yy| {
